@@ -26,6 +26,8 @@ import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.ChatResponseMetadata;
 import dev.langchain4j.model.chat.response.CompleteToolCall;
+import dev.langchain4j.model.chat.response.PartialThinking;
+import dev.langchain4j.model.chat.response.PartialThinkingContext;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.openaiofficial.OpenAiOfficialChatRequestParameters;
 import dev.langchain4j.model.openaiofficial.OpenAiOfficialChatResponseMetadata;
@@ -485,10 +487,10 @@ class OpenAiOfficialResponsesStreamingChatModelIT extends AbstractStreamingChatM
 
     @Test
     void should_support_reasoning_summary() {
-
+        System.err.println("HELP!!!!");
         // given
         StreamingChatModel model = InternalOpenAiOfficialTestHelper.responsesStreamingChatModelBuilder()
-                .modelName("o4-mini")
+                .modelName("gpt-5.3-codex")
                 .reasoningEffort(ReasoningEffort.of("medium"))
                 .reasoningSummary(Reasoning.Summary.of("auto"))
                 .build();
@@ -501,6 +503,7 @@ class OpenAiOfficialResponsesStreamingChatModelIT extends AbstractStreamingChatM
         // then
         assertThat(handler.get().aiMessage().text()).isNotBlank();
         assertThat(handler.get().aiMessage().thinking()).isNotBlank();
+        assertThat(handler.getThinking()).isNotBlank();
     }
 
     @Test

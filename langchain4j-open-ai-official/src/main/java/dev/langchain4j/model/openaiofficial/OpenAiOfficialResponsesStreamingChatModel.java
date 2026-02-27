@@ -885,7 +885,6 @@ public class OpenAiOfficialResponsesStreamingChatModel implements StreamingChatM
             String delta = event.delta();
             if (delta != null && !delta.isEmpty()) {
                 reasoningSummaryBuilder.append(delta);
-                onPartialThinking(handler, delta, streamingHandle);
             }
         }
 
@@ -900,7 +899,7 @@ public class OpenAiOfficialResponsesStreamingChatModel implements StreamingChatM
 
         private void handleReasoningSummaryTextDone(
                 com.openai.models.responses.ResponseReasoningSummaryTextDoneEvent event) {
-            // No-op - summary is already accumulated in reasoningSummaryBuilder
+            onPartialThinking(handler, event.text(), streamingHandle);
         }
 
         private void handleReasoningSummaryPartDone(
