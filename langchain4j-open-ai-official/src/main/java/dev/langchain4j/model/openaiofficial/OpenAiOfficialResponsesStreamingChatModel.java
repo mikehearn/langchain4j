@@ -42,6 +42,7 @@ import com.openai.models.responses.ResponseInputText;
 import com.openai.models.responses.ResponseOutputItem;
 import com.openai.models.responses.ResponseOutputItemAddedEvent;
 import com.openai.models.responses.ResponseOutputItemDoneEvent;
+import com.openai.models.responses.ResponseReasoningItem;
 import com.openai.models.responses.ResponseStreamEvent;
 import com.openai.models.responses.ResponseTextConfig;
 import com.openai.models.responses.ResponseTextDeltaEvent;
@@ -98,6 +99,8 @@ public class OpenAiOfficialResponsesStreamingChatModel implements StreamingChatM
 
     private static final Logger logger = LoggerFactory.getLogger(OpenAiOfficialResponsesStreamingChatModel.class);
     private static final String PROMPT_CACHE_RETENTION_FIELD = "prompt_cache_retention";
+    static final String REASONING_ITEMS_KEY =
+            "openai_reasoning_items"; // do not change, will break backward compatibility!
 
     private final OpenAIClient client;
     private final ExecutorService executorService;
@@ -337,13 +340,15 @@ public class OpenAiOfficialResponsesStreamingChatModel implements StreamingChatM
         return ModelProvider.OPEN_AI;
     }
 
-    private static List<ResponseInputItem> toResponseInputItems(ChatMessage msg) {
+    static List<ResponseInputItem> toResponseInputItems(ChatMessage msg) {
         if (msg instanceof SystemMessage systemMessage) {
             return List.of(createTextMessage(EasyInputMessage.Role.SYSTEM, systemMessage.text()));
         } else if (msg instanceof UserMessage userMessage) {
             return List.of(createUserMessage(userMessage));
         } else if (msg instanceof AiMessage aiMessage) {
             var items = new ArrayList<ResponseInputItem>();
+
+            reasoningItemsFrom(aiMessage).stream().map(ResponseInputItem::ofReasoning).forEach(items::add);
 
             // Add text message if present
             var text = aiMessage.text();
@@ -377,6 +382,56 @@ public class OpenAiOfficialResponsesStreamingChatModel implements StreamingChatM
         } else {
             return List.of(createTextMessage(EasyInputMessage.Role.USER, msg.toString()));
         }
+    }
+
+    private static List<ResponseReasoningItem> reasoningItemsFrom(AiMessage aiMessage) {
+        Object value = aiMessage.attributes().get(REASONING_ITEMS_KEY);
+        if (value instanceof ResponseReasoningItem reasoningItem) {
+            return List.of(reasoningItem);
+        }
+        if (!(value instanceof List<?> values) || values.isEmpty()) {
+            return List.of();
+        }
+
+        var reasoningItems = new ArrayList<ResponseReasoningItem>(values.size());
+        for (Object candidate : values) {
+            if (candidate instanceof ResponseReasoningItem reasoningItem) {
+                reasoningItems.add(reasoningItem);
+            }
+        }
+        return reasoningItems;
+    }
+
+    private static List<ResponseOutputItem> outputItemsOf(com.openai.models.responses.Response response) {
+        if (response == null) {
+            return List.of();
+        }
+        try {
+            List<ResponseOutputItem> outputItems = response.output();
+            return outputItems == null ? List.of() : outputItems;
+        } catch (RuntimeException ex) {
+            logger.debug("Failed to read response output", ex);
+            return List.of();
+        }
+    }
+
+    static List<ResponseReasoningItem> extractReasoningItems(List<ResponseOutputItem> outputItems) {
+        if (outputItems == null || outputItems.isEmpty()) {
+            return List.of();
+        }
+
+        List<ResponseReasoningItem> reasoningItems = new ArrayList<>();
+        for (ResponseOutputItem item : outputItems) {
+            if (item == null) {
+                continue;
+            }
+            try {
+                item.reasoning().ifPresent(reasoningItems::add);
+            } catch (RuntimeException ex) {
+                logger.debug("Failed to extract reasoning item from response output item", ex);
+            }
+        }
+        return reasoningItems.isEmpty() ? List.of() : List.copyOf(reasoningItems);
     }
 
     private static ResponseInputItem createTextMessage(EasyInputMessage.Role role, String text) {
@@ -1022,15 +1077,21 @@ public class OpenAiOfficialResponsesStreamingChatModel implements StreamingChatM
 
             // Build final AI message (include reasoning summary if present)
             String text = !textBuilder.isEmpty() ? textBuilder.toString() : (completedToolCalls.isEmpty() ? "" : null);
-            String reasoning = extractReasoningSummary(response);
+            List<ResponseReasoningItem> reasoningItems = extractReasoningItems(outputItemsOf(response));
+            String reasoning = extractReasoningSummary(reasoningItems);
             if ((reasoning == null || reasoning.isBlank()) && reasoningSummaryBuilder.length() > 0) {
                 reasoning = reasoningSummaryBuilder.toString();
             }
 
+            Map<String, Object> attributes = reasoningItems.isEmpty()
+                    ? Map.of()
+                    : Map.of(REASONING_ITEMS_KEY, List.copyOf(reasoningItems));
+
             AiMessage.Builder aiMessageBuilder = AiMessage.builder()
                     .text(text)
                     .thinking(reasoning == null || reasoning.isBlank() ? null : reasoning)
-                    .toolExecutionRequests(completedToolCalls);
+                    .toolExecutionRequests(completedToolCalls)
+                    .attributes(attributes);
 
             AiMessage aiMessage = aiMessageBuilder.build();
 
@@ -1058,30 +1119,13 @@ public class OpenAiOfficialResponsesStreamingChatModel implements StreamingChatM
             }
         }
 
-        private static String extractReasoningSummary(com.openai.models.responses.Response response) {
-            if (response == null) {
-                return null;
-            }
-            List<ResponseOutputItem> outputItems;
-            try {
-                outputItems = response.output();
-            } catch (RuntimeException ex) {
-                logger.debug("Failed to read response output while extracting reasoning summary", ex);
-                return null;
-            }
-            if (outputItems == null || outputItems.isEmpty()) {
+        private static String extractReasoningSummary(List<ResponseReasoningItem> reasoningItems) {
+            if (reasoningItems == null || reasoningItems.isEmpty()) {
                 return null;
             }
             List<String> reasoningSummaryParts = new ArrayList<>();
-            for (ResponseOutputItem item : outputItems) {
-                if (item == null) {
-                    continue;
-                }
+            for (ResponseReasoningItem reasoningItem : reasoningItems) {
                 try {
-                    if (item.reasoning().isEmpty()) {
-                        continue;
-                    }
-                    var reasoningItem = item.reasoning().get();
                     var summaryParts = reasoningItem.summary();
                     if (summaryParts == null || summaryParts.isEmpty()) {
                         continue;
@@ -1097,7 +1141,7 @@ public class OpenAiOfficialResponsesStreamingChatModel implements StreamingChatM
                         reasoningSummaryParts.add(text);
                     }
                 } catch (RuntimeException ex) {
-                    logger.debug("Failed to extract reasoning summary from response output item", ex);
+                    logger.debug("Failed to extract reasoning summary from reasoning item", ex);
                 }
             }
             return reasoningSummaryParts.isEmpty() ? null : String.join("\n", reasoningSummaryParts);
